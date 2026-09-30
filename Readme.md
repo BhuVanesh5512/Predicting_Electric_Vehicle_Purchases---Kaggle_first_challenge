@@ -15,3 +15,5 @@ used  model :CatboostClassifier
 iterables : 700
 learning_rate :0.1
 depth : 4
+
+all categorical features are used as cat features 
