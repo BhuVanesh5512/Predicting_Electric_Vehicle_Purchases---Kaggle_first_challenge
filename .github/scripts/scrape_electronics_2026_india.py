@@ -224,12 +224,23 @@ def explicit_year_from_text(text: str) -> Optional[int]:
 
 
 def find_release_year(item: dict[str, Any]) -> Optional[int]:
-    # Smartprix may expose a release date directly, or as a spec.
+    # Prefer explicit structured release/launch fields from Smartprix.
+    direct_keys = (
+        "releaseDate", "release_date", "releasedOn", "released_on",
+        "launchDate", "launch_date", "availableFrom", "available_from",
+        "announcementDate", "announcement_date", "introducedDate", "introduced_date",
+    )
+    for key in direct_keys:
+        if key in item:
+            m = re.search(r"\b(20(?:0\d|1\d|2[0-6]))\b", str(item.get(key) or ""))
+            if m:
+                return int(m.group(1))
+
+    # Also inspect any key whose name explicitly signals a launch/release date.
     for key, value in item.items():
         low = str(key).lower()
         if any(token in low for token in ("release", "launch", "available", "announced", "introduced")):
-            text = str(value or "")
-            m = re.search(r"\b(20(?:0\d|1\d|2[0-6]))\b", text)
+            m = re.search(r"\b(20(?:0\d|1\d|2[0-6]))\b", str(value or ""))
             if m:
                 return int(m.group(1))
 
