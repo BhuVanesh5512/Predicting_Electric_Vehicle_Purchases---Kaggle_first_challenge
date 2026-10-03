@@ -76,6 +76,12 @@ CATEGORY_MAP = {
 ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
 
 
+def fetch_text(session, url: str, timeout: int = 45) -> str:
+    response = session.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.text
+
+
 def encode_api_payload(payload: dict[str, Any]) -> str:
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     out = "1"
