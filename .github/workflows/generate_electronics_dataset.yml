@@ -26,19 +26,14 @@ jobs:
       - name: Install scraper dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install selenium beautifulsoup4
-
-      - name: Check Chrome
-        run: |
-          google-chrome --version
-          chromedriver --version || true
+          pip install cloudscraper beautifulsoup4
 
       - name: Scrape live Smartprix India catalog
         run: |
           python .github/scripts/scrape_electronics_2026_india.py \
             --target 5000 \
             --output electronics_2026_india_5000plus.csv \
-            --pause 1.0
+            --pause 0.35
 
       - name: Validate dataset
         run: |
