@@ -1,80 +1,100 @@
-name: Generate 5000+ real electronics CSV from live Smartprix
+name: Generate 5000+ real electronics CSV from Smartprix India
 
 on:
-  push:
-    paths:
-      - .github/workflows/generate_electronics_dataset.yml
-      - .github/scripts/scrape_electronics_2026_india.py
   workflow_dispatch:
 
 jobs:
-  scrape:
+  scrape-shards:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5]
     timeout-minutes: 360
     permissions:
-      contents: write
-
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install scraper dependencies
         run: |
           python -m pip install --upgrade pip
           pip install cloudscraper beautifulsoup4
-
-      - name: Scrape live Smartprix India catalog
+      - name: Scrape Smartprix shard
         run: |
           python .github/scripts/scrape_electronics_2026_india.py \
-            --target 5000 \
-            --output electronics_2026_india_5000plus.csv \
-            --pause 0.35
+            --target 1000 \
+            --output shard_${{ matrix.shard }}.csv \
+            --pause 1.2 \
+            --shard ${{ matrix.shard }} \
+            --shards 6
+      - name: Upload shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: electronics-shard-${{ matrix.shard }}
+          path: shard_${{ matrix.shard }}.csv
+          retention-days: 30
 
-      - name: Validate dataset
+  merge:
+    needs: scrape-shards
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: electronics-shard-*
+          path: shards
+          merge-multiple: false
+      - name: Merge, deduplicate and validate
         run: |
           python - <<'PY'
-          import csv
+          import csv, glob
           from collections import Counter
-
-          path = "electronics_2026_india_5000plus.csv"
-          with open(path, encoding="utf-8-sig", newline="") as f:
-              rows = list(csv.DictReader(f))
-
-          required = {"id","productname","brand","category","price","rating","release_year"}
-          assert len(rows) >= 5000, len(rows)
-          assert set(rows[0]) == required, rows[0].keys()
-          assert all(r["productname"].strip() for r in rows)
+          files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
+          rows, seen = [], set()
+          for path in files:
+              with open(path, encoding="utf-8-sig", newline="") as f:
+                  for r in csv.DictReader(f):
+                      key=(r["productname"].strip().casefold(),r["brand"].strip().casefold(),r["category"].strip().casefold())
+                      if key not in seen:
+                          seen.add(key); rows.append(r)
+          if len(rows) < 5000:
+              raise SystemExit(f"Only {len(rows)} unique rows collected; need at least 5000")
+          rows=rows[:6000]
+          for i,r in enumerate(rows,1): r["id"]=i
+          out="electronics_2026_india_5000plus.csv"
+          with open(out,"w",encoding="utf-8",newline="") as f:
+              w=csv.DictWriter(f,fieldnames=["id","productname","brand","category","price","rating","release_year"])
+              w.writeheader(); w.writerows(rows)
           assert all(r["brand"].strip() for r in rows)
           assert all(r["category"].strip() for r in rows)
-          assert all(float(r["price"]) > 0 for r in rows)
-          assert all(0 <= float(r["rating"]) <= 5 for r in rows)
-
-          years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
-          assert all(2000 <= y <= 2026 for y in years)
-
-          cats = Counter(r["category"] for r in rows)
-          print("ROWS:", len(rows))
-          print("RELEASE_YEAR_FILLED:", len(years))
-          print("RELEASE_YEAR_MISSING:", len(rows)-len(years))
-          print("TOP_CATEGORIES:", cats.most_common(20))
-          print("FIRST_ROW:", rows[0])
-          print("LAST_ROW:", rows[-1])
+          assert all(float(r["price"])>0 for r in rows)
+          assert all(0<=float(r["rating"])<=5 for r in rows)
+          years=[int(r["release_year"]) for r in rows if r["release_year"].strip()]
+          assert all(2000<=y<=2026 for y in years)
+          print("ROWS:",len(rows))
+          print("BRANDS:",len({r["brand"] for r in rows}))
+          print("CATEGORIES:",Counter(r["category"] for r in rows).most_common())
+          print("RELEASE_YEAR_FILLED:",len(years))
+          print("RELEASE_YEAR_MISSING:",len(rows)-len(years))
           PY
-
       - name: Commit corrected dataset
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add electronics_2026_india_5000plus.csv
-          git commit -m "Add corrected live Smartprix 2026 electronics dataset" || echo "No dataset changes to commit"
+          git commit -m "Add corrected Smartprix 2026 India electronics dataset" || echo "No changes to commit"
           git push
-
-      - name: Upload CSV artifact
+      - name: Upload final CSV
         uses: actions/upload-artifact@v4
         with:
           name: electronics-2026-india-5000plus
