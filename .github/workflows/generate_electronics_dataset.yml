@@ -28,6 +28,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install cloudscraper beautifulsoup4
+      - name: Validate scraper code
+        run: python -m py_compile .github/scripts/scrape_electronics_2026_india.py
+
       - name: Scrape Smartprix shard
         run: |
           python .github/scripts/scrape_electronics_2026_india.py \
