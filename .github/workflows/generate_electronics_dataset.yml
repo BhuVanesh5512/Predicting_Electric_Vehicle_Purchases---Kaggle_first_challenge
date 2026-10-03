@@ -37,6 +37,7 @@ jobs:
         with:
           name: electronics-shard-${{ matrix.shard }}
           path: shard_${{ matrix.shard }}.csv
+          if-no-files-found: error
           retention-days: 30
 
   merge:
@@ -60,6 +61,10 @@ jobs:
           import csv, glob
           from collections import Counter
           files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
+          expected = [f"shards/electronics-shard-{i}/shard_{i}.csv" for i in range(6)]
+          missing = [p for p in expected if p not in files]
+          if missing:
+              raise SystemExit("Missing shard artifacts: " + ", ".join(missing))
           rows, seen = [], set()
           for path in files:
               with open(path, encoding="utf-8-sig", newline="") as f:
