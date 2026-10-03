@@ -1,25 +1,4 @@
 #!/usr/bin/env python3
-# Smartprix India category sitemaps. Unknown/changed slugs are skipped.
-SITEMAP_CATEGORY_SLUGS = {
-    "Mobiles": "mobiles",
-    "Laptops": "laptops",
-    "TVs": "tvs",
-    "Headphones": "mobile_headphones",
-    "Speakers": "mobile_speakers",
-    "Smartwatches": "smartwatches",
-    "Tablets": "tablets",
-    "Monitors": "monitors",
-    "Cameras": "cameras",
-    "Power banks": "power_banks",
-    "Printers": "printers",
-    "Projectors": "projectors",
-    "Routers / networking": "routers",
-    "Gaming consoles": "gaming_consoles",
-    "Microphones": "microphones",
-    "Webcams": "webcams",
-    "Soundbars": "soundbars",
-}
-#!/usr/bin/env python3
 """
 Collect 5,000+ real electronics products from Smartprix India.
 
