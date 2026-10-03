@@ -456,6 +456,22 @@ def scrape(target: int = 1200, pause: float = 1.2, shard: int = 0, shards: int =
         time.sleep(pause)
 
     return products
+def write_csv(rows: Iterable[Product], output: str) -> None:
+    with open(output, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(OUTPUT_COLUMNS)
+        for idx, product in enumerate(rows, 1):
+            writer.writerow([
+                idx,
+                product.productname,
+                product.brand,
+                product.category,
+                product.price,
+                product.rating,
+                product.release_year if product.release_year is not None else "",
+            ])
+
+
 def main() -> None:
     import argparse
 
