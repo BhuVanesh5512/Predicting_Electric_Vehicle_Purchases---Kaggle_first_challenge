@@ -33,7 +33,7 @@ jobs:
 
       - name: Scrape Smartprix shard
         run: |
-          python .github/scripts/scrape_electronics_2026_india.py \
+          python .github/scripts/smartprix_electronics_scraper.py \
             --target 1000 \
             --output shard_${{ matrix.shard }}.csv \
             --pause 1.2 \
