@@ -356,52 +356,101 @@ def category_from_query_or_name(category: str, name: str) -> str:
     return category
 
 
-def scrape(target: int, headless: bool, max_pages_per_source: int = 1, pause: float = 1.0) -> list[Product]:
+def add_page_param(base_url: str, page: int) -> str:
+    # Smartprix category pages use ?page=N pagination.
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}page={page}"
+
+
+def scrape(target: int, headless: bool, max_pages_per_source: int = 250, pause: float = 1.0) -> list[Product]:
     driver = build_driver(headless=headless)
     products: dict[tuple[str, str, str], Product] = {}
     try:
-        # First pass: broad category pages.
+        # Crawl real Smartprix pagination. The current site exposes ~20-30
+        # products per page, so a single page cannot produce 5,000 rows.
         for category, urls in CATEGORY_SOURCES.items():
             if len(products) >= target:
                 break
-            for url in urls[:max_pages_per_source]:
-                try:
-                    print(f"[+] {category}: {url}", flush=True)
-                    driver.get(url)
-                    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                    gentle_scroll_and_load_more(driver, rounds=60, delay=max(0.4, pause))
-                    batch = extract_card_candidates(driver, category)
-                    print(f"    candidates: {len(batch)}", flush=True)
-                    for p in batch:
-                        p.category = category_from_query_or_name(p.category, p.productname)
-                        # Product/brand/category is the identity; variants remain unique by title.
-                        key = (p.productname.casefold(), p.brand.casefold(), p.category.casefold())
-                        if key not in products:
-                            products[key] = p
-                        if len(products) >= target:
-                            break
-                except Exception as exc:
-                    print(f"    ! source error: {exc}", file=sys.stderr, flush=True)
-                time.sleep(pause)
 
-        # Enrich candidates until we have enough valid rows.
-        # We never synthesize a rating; products with no real rating are skipped.
+            for base_url in urls:
+                consecutive_empty = 0
+                previous_count = len(products)
+
+                for page in range(1, max_pages_per_source + 1):
+                    if len(products) >= target:
+                        break
+
+                    url = base_url if page == 1 else add_page_param(base_url, page)
+                    try:
+                        print(f"[+] {category} page {page}: {url}", flush=True)
+                        driver.get(url)
+                        WebDriverWait(driver, 20).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "body"))
+                        )
+
+                        # A shorter scroll budget is enough per paginated page.
+                        gentle_scroll_and_load_more(driver, rounds=12, delay=max(0.35, pause))
+                        batch = extract_card_candidates(driver, category)
+                        print(f"    candidates: {len(batch)}", flush=True)
+
+                        new_on_page = 0
+                        for p in batch:
+                            p.category = category_from_query_or_name(p.category, p.productname)
+                            key = (
+                                p.productname.casefold(),
+                                p.brand.casefold(),
+                                p.category.casefold(),
+                            )
+                            if key not in products:
+                                products[key] = p
+                                new_on_page += 1
+
+                        print(f"    new unique: {new_on_page}; total candidates: {len(products)}", flush=True)
+
+                        if new_on_page == 0:
+                            consecutive_empty += 1
+                        else:
+                            consecutive_empty = 0
+
+                        # Stop after several pages that yield nothing new.
+                        if consecutive_empty >= 3:
+                            break
+
+                        # If the site has fewer products than the requested page,
+                        # stop naturally once the page stops yielding new records.
+                        time.sleep(pause)
+
+                    except Exception as exc:
+                        print(f"    ! page error: {exc}", file=sys.stderr, flush=True)
+                        consecutive_empty += 1
+                        if consecutive_empty >= 3:
+                            break
+
+                if len(products) == previous_count and len(products) > 0:
+                    continue
+
+        # Enrich only where rating is missing. Release year remains blank unless
+        # the source explicitly provides one; no fabricated years.
         valid: list[Product] = []
         seen = set()
         for i, p in enumerate(products.values(), 1):
-            if p.rating is None or p.release_year is None:
-                p = enrich_from_detail(driver, p)
             if p.rating is None:
-                continue
-            if p.price is None:
+                p = enrich_from_detail(driver, p)
+            if p.rating is None or p.price is None:
                 continue
             if p.release_year is not None and not (2000 <= p.release_year <= 2026):
                 p.release_year = None
-            key = (p.productname.casefold(), p.brand.casefold(), p.category.casefold())
+
+            key = (
+                p.productname.casefold(),
+                p.brand.casefold(),
+                p.category.casefold(),
+            )
             if key in seen:
                 continue
             seen.add(key)
             valid.append(p)
+
             if len(valid) % 100 == 0:
                 print(f"[+] valid rows: {len(valid)}", flush=True)
             if len(valid) >= target:
