@@ -35,7 +35,10 @@ jobs:
 
       - name: Scrape live Smartprix India catalog
         run: |
-          python .github/scripts/scrape_electronics_2026_india.py             --target 5000             --output electronics_2026_india_5000plus.csv             --pages 25             --pause 1.0
+          python .github/scripts/scrape_electronics_2026_india.py \
+            --target 5000 \
+            --output electronics_2026_india_5000plus.csv \
+            --pause 1.0
 
       - name: Validate dataset
         run: |
