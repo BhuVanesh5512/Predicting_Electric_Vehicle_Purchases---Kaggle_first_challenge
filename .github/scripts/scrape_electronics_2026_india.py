@@ -414,7 +414,7 @@ def fetch_product_json(session, product_url: str, max_retries: int = 6) -> Optio
     return None
 def scrape(target: int = 1200, pause: float = 1.2, shard: int = 0, shards: int = 1) -> list[Product]:
     session = cloudscraper.create_scraper()
-    all_urls = fetch_product_urls(session, per_category_limit=800)
+    all_urls = fetch_product_urls(session, per_category_limit=1800)
 
     if not all_urls:
         raise RuntimeError("No Smartprix product URLs were found.")
