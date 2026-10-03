@@ -1,5 +1,4 @@
-#
-
+#!/usr/bin/env python3
 # Smartprix India category sitemaps. Unknown/changed slugs are skipped.
 SITEMAP_CATEGORY_SLUGS = {
     "Mobiles": "mobiles",
@@ -20,7 +19,7 @@ SITEMAP_CATEGORY_SLUGS = {
     "Webcams": "webcams",
     "Soundbars": "soundbars",
 }
-!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Collect 5,000+ real electronics products from Smartprix India.
 
