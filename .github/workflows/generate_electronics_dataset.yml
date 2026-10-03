@@ -1,169 +1,84 @@
-name: Generate 5000+ real electronics CSV
+name: Generate 5000+ real electronics CSV from live Smartprix
 
 on:
   push:
     paths:
       - .github/workflows/generate_electronics_dataset.yml
+      - .github/scripts/scrape_electronics_2026_india.py
   workflow_dispatch:
 
 jobs:
-  build-dataset:
+  scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     permissions:
-      contents: read
-      actions: write
+      contents: write
+
     steps:
-      - name: Download 42K Amazon electronics source
-        shell: bash
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scraper dependencies
         run: |
-          set -euo pipefail
-          curl -L --fail --retry 3 \
-            "https://www.kaggle.com/api/v1/datasets/download/ikramshah512/amazon-products-sales-dataset-42k-items-2025" \
-            -o source.zip
-          unzip -o source.zip
-          echo "Downloaded source files:"
-          find . -maxdepth 3 -type f -name "*.csv" -print
+          python -m pip install --upgrade pip
+          pip install selenium beautifulsoup4
 
-      - name: Build normalized CSV
-        shell: bash
+      - name: Check Chrome
         run: |
-          set -euo pipefail
-          python - <<'PY'
-          import csv, re
-          from pathlib import Path
+          google-chrome --version
+          chromedriver --version || true
 
-          candidates = [p for p in Path(".").rglob("*.csv") if p.name != "electronics_5000plus_real.csv"]
-          if not candidates:
-              raise SystemExit("No CSV source file found after download")
-
-          preferred = [p for p in candidates if "cleaned" in p.name.lower()]
-          src = preferred[0] if preferred else candidates[0]
-
-          def norm(s):
-              return re.sub(r"[^a-z0-9]+", "_", (s or "").strip().lower()).strip("_")
-
-          with src.open("r", encoding="utf-8-sig", newline="") as f:
-              reader = csv.DictReader(f)
-              field_map = {norm(x): x for x in (reader.fieldnames or [])}
-
-              def pick(*names):
-                  for name in names:
-                      if norm(name) in field_map:
-                          return field_map[norm(name)]
-                  return None
-
-              title_col = pick("product_title", "product_name", "title", "name")
-              category_col = pick("product_category", "category", "category_name")
-              price_col = pick("discounted_price", "current_discounted_price", "price", "selling_price", "sale_price")
-              rating_col = pick("product_rating", "rating", "average_rating", "rating_stars")
-              year_col = pick("release_year", "launch_year", "year_released")
-
-              if not all([title_col, category_col, price_col, rating_col]):
-                  raise SystemExit({
-                      "columns": reader.fieldnames,
-                      "title": title_col,
-                      "category": category_col,
-                      "price": price_col,
-                      "rating": rating_col
-                  })
-
-              def clean_price(v):
-                  m = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", (v or "").replace("₹", "").replace("$", ""))
-                  if not m:
-                      return None
-                  try:
-                      return round(float(m.group(0).replace(",", "")), 2)
-                  except ValueError:
-                      return None
-
-              def clean_rating(v):
-                  try:
-                      x = float((v or "").strip())
-                  except ValueError:
-                      return None
-                  if 0 <= x <= 5:
-                      return round(x, 2)
-                  return None
-
-              def clean_category(v):
-                  x = (v or "").strip()
-                  if not x:
-                      return None
-                  x = re.split(r"\s*[|>]+\s*", x)[0].strip()
-                  return x or None
-
-              def infer_brand(title):
-                  parts = re.split(r"\s+", (title or "").strip())
-                  return parts[0] if parts else None
-
-              rows = []
-              seen = set()
-
-              for raw in reader:
-                  title = (raw.get(title_col) or "").strip()
-                  category = clean_category(raw.get(category_col))
-                  price = clean_price(raw.get(price_col))
-                  rating = clean_rating(raw.get(rating_col))
-                  if not title or not category or price is None or rating is None:
-                      continue
-
-                  key = (title.lower(), price, rating)
-                  if key in seen:
-                      continue
-                  seen.add(key)
-
-                  release_year = ""
-                  if year_col:
-                      y = (raw.get(year_col) or "").strip()
-                      m = re.search(r"\b(19\d{2}|20\d{2})\b", y)
-                      if m:
-                          release_year = m.group(1)
-
-                  rows.append({
-                      "id": len(rows) + 1,
-                      "productname": title,
-                      "brand": infer_brand(title),
-                      "category": category,
-                      "price": price,
-                      "rating": rating,
-                      "release_year": release_year,
-                  })
-                  if len(rows) >= 6000:
-                      break
-
-          if len(rows) < 5000:
-              raise SystemExit(f"Only {len(rows)} valid unique rows found; need at least 5000")
-
-          out = Path("electronics_5000plus_real.csv")
-          with out.open("w", encoding="utf-8", newline="") as f:
-              writer = csv.DictWriter(f, fieldnames=["id","productname","brand","category","price","rating","release_year"])
-              writer.writeheader()
-              writer.writerows(rows)
-
-          print(f"Source: {src}")
-          print(f"Rows written: {len(rows)}")
-          print(f"Output: {out}")
-          PY
-
-      - name: Verify output
-        shell: bash
+      - name: Scrape live Smartprix India catalog
         run: |
-          set -euo pipefail
+          python .github/scripts/scrape_electronics_2026_india.py             --target 5000             --output electronics_2026_india_5000plus.csv             --pages 25             --pause 1.0
+
+      - name: Validate dataset
+        run: |
           python - <<'PY'
           import csv
-          with open("electronics_5000plus_real.csv", encoding="utf-8", newline="") as f:
+          from collections import Counter
+
+          path = "electronics_2026_india_5000plus.csv"
+          with open(path, encoding="utf-8-sig", newline="") as f:
               rows = list(csv.DictReader(f))
-          assert len(rows) >= 5000
-          assert set(rows[0]) == {"id","productname","brand","category","price","rating","release_year"}
+
+          required = {"id","productname","brand","category","price","rating","release_year"}
+          assert len(rows) >= 5000, len(rows)
+          assert set(rows[0]) == required, rows[0].keys()
+          assert all(r["productname"].strip() for r in rows)
+          assert all(r["brand"].strip() for r in rows)
+          assert all(r["category"].strip() for r in rows)
+          assert all(float(r["price"]) > 0 for r in rows)
           assert all(0 <= float(r["rating"]) <= 5 for r in rows)
-          print("VALIDATED_ROWS=", len(rows))
-          print("FIRST_ROW=", rows[0])
-          print("LAST_ROW=", rows[-1])
+
+          years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
+          assert all(2000 <= y <= 2026 for y in years)
+
+          cats = Counter(r["category"] for r in rows)
+          print("ROWS:", len(rows))
+          print("RELEASE_YEAR_FILLED:", len(years))
+          print("RELEASE_YEAR_MISSING:", len(rows)-len(years))
+          print("TOP_CATEGORIES:", cats.most_common(20))
+          print("FIRST_ROW:", rows[0])
+          print("LAST_ROW:", rows[-1])
           PY
+
+      - name: Commit corrected dataset
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add electronics_2026_india_5000plus.csv
+          git commit -m "Add corrected live Smartprix 2026 electronics dataset" || echo "No dataset changes to commit"
+          git push
 
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: electronics-5000plus-real
-          path: electronics_5000plus_real.csv
+          name: electronics-2026-india-5000plus
+          path: electronics_2026_india_5000plus.csv
           retention-days: 30
