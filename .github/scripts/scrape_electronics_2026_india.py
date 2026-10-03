@@ -82,6 +82,15 @@ def fetch_text(session, url: str, timeout: int = 45) -> str:
     return response.text
 
 
+def iter_sitemap_locs(xml_text: str) -> list[str]:
+    root = ET.fromstring(xml_text)
+    return [
+        loc.text.strip()
+        for loc in root.findall(".//{*}loc")
+        if loc.text and loc.text.strip()
+    ]
+
+
 def encode_api_payload(payload: dict[str, Any]) -> str:
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     out = "1"
