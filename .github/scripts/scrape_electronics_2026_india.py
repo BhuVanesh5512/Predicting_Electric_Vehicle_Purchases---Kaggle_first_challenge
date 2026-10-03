@@ -318,6 +318,55 @@ def fetch_product_urls(session, per_category_limit: int = 750) -> list[tuple[str
                 result.append((values[i], category))
     print(f"[+] balanced product URLs: {len(result)}", flush=True)
     return result
+def category_from_url(url: str) -> Optional[str]:
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return None
+    slug = path.split("/", 1)[0].lower()
+    return CATEGORY_MAP.get(slug)
+
+
+def parse_product(data: dict[str, Any], product_url: str) -> Optional[Product]:
+    item = data.get("item")
+    if not isinstance(item, dict):
+        return None
+
+    name = str(item.get("name") or "").strip()
+    brand_obj = item.get("brand")
+    if isinstance(brand_obj, dict):
+        brand = normalize_brand_name(brand_obj.get("name"))
+    else:
+        brand = normalize_brand_name(brand_obj)
+
+    category = category_from_url(product_url)
+    if not name or not brand or not category:
+        return None
+
+    price = clean_price(item.get("price"))
+    if price is None:
+        price = clean_price(item.get("currentPrice"))
+    if price is None:
+        price = clean_price(item.get("fe_price"))
+
+    rating = find_rating(item)
+    release_year = find_release_year(item)
+
+    if price is None or rating is None:
+        return None
+
+    if release_year is not None and not (2000 <= release_year <= 2026):
+        release_year = None
+
+    return Product(
+        productname=name,
+        brand=brand,
+        category=category,
+        price=price,
+        rating=rating,
+        release_year=release_year,
+    )
+
+
 def fetch_product_json(session, product_url: str, max_retries: int = 6) -> Optional[dict[str, Any]]:
     path = urlparse(product_url).path
 
