@@ -1,4 +1,26 @@
-#!/usr/bin/env python3
+#
+
+# Smartprix India category sitemaps. Unknown/changed slugs are skipped.
+SITEMAP_CATEGORY_SLUGS = {
+    "Mobiles": "mobiles",
+    "Laptops": "laptops",
+    "TVs": "tvs",
+    "Headphones": "mobile_headphones",
+    "Speakers": "mobile_speakers",
+    "Smartwatches": "smartwatches",
+    "Tablets": "tablets",
+    "Monitors": "monitors",
+    "Cameras": "cameras",
+    "Power banks": "power_banks",
+    "Printers": "printers",
+    "Projectors": "projectors",
+    "Routers / networking": "routers",
+    "Gaming consoles": "gaming_consoles",
+    "Microphones": "microphones",
+    "Webcams": "webcams",
+    "Soundbars": "soundbars",
+}
+!/usr/bin/env python3
 """
 Collect 5,000+ real electronics products from Smartprix India.
 
@@ -80,6 +102,37 @@ class Product:
     rating: Optional[float]
     release_year: Optional[int]
 
+
+
+BRAND_ALIASES = {
+    "oppo": "Oppo", "vivo": "Vivo", "realme": "Realme",
+    "oneplus": "OnePlus", "iqoo": "iQOO", "poco": "Poco",
+    "boat": "boAt", "boAt": "boAt", "dji": "DJI",
+    "hp": "HP", "asus": "Asus", "msi": "MSI", "wd": "WD",
+    "tp-link": "TP-Link", "tp link": "TP-Link", "tenda": "Tenda",
+    "d-link": "D-Link", "d link": "D-Link", "lg": "LG",
+    "jbl": "JBL", "sony": "Sony", "samsung": "Samsung",
+    "apple": "Apple", "xiaomi": "Xiaomi", "google": "Google",
+    "motorola": "Motorola", "nothing": "Nothing", "honor": "Honor",
+    "canon": "Canon", "nikon": "Nikon", "fujifilm": "Fujifilm",
+    "panasonic": "Panasonic", "gopro": "GoPro", "lenovo": "Lenovo",
+    "dell": "Dell", "acer": "Acer", "microsoft": "Microsoft",
+    "tcl": "TCL", "hisense": "Hisense", "vu": "Vu",
+    "sandisk": "SanDisk", "kingston": "Kingston", "seagate": "Seagate",
+    "crucial": "Crucial", "netgear": "Netgear", "fastrack": "Fastrack",
+    "fire-boltt": "Fire-Boltt", "fire boltt": "Fire-Boltt",
+    "amazfit": "Amazfit", "garmin": "Garmin", "fossil": "Fossil",
+    "logitech": "Logitech", "razer": "Razer", "zebronics": "Zebronics",
+    "portronics": "Portronics", "anker": "Anker", "ugreen": "UGREEN",
+    "belkin": "Belkin",
+}
+
+
+def normalize_brand_name(value: Any) -> str:
+    raw = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not raw:
+        return ""
+    return BRAND_ALIASES.get(raw, BRAND_ALIASES.get(raw.lower(), raw))
 
 def clean_price(value: Any) -> Optional[int]:
     if value is None:
@@ -172,15 +225,15 @@ def explicit_year_from_text(text: str) -> Optional[int]:
 
 
 def find_release_year(item: dict[str, Any]) -> Optional[int]:
-    # Check obvious scalar fields first.
+    # Smartprix may expose a release date directly, or as a spec.
     for key, value in item.items():
         low = str(key).lower()
         if any(token in low for token in ("release", "launch", "available", "announced", "introduced")):
-            year = explicit_year_from_text(str(value))
-            if year is not None:
-                return year
+            text = str(value or "")
+            m = re.search(r"\b(20(?:0\d|1\d|2[0-6]))\b", text)
+            if m:
+                return int(m.group(1))
 
-    # Search structured specs, but require an explicit release/launch/availability cue.
     full_specs = item.get("fullSpecs", [])
     if isinstance(full_specs, list):
         for group in full_specs:
@@ -194,171 +247,120 @@ def find_release_year(item: dict[str, Any]) -> Optional[int]:
                 description = str(spec.get("description", ""))
                 combined = f"{group_title} {title}: {description}"
                 if re.search(r"release|launch|available|announced|introduced", combined, re.I):
-                    year = explicit_year_from_text(combined)
-                    if year is not None:
-                        return year
-
-    # Do not infer a year just because the model name contains one.
+                    m = re.search(r"\b(20(?:0\d|1\d|2[0-6]))\b", combined)
+                    if m:
+                        return int(m.group(1))
     return None
-
-
-def category_from_url(url: str) -> Optional[str]:
-    path = urlparse(url).path.strip("/")
-    if not path:
-        return None
-    slug = path.split("/", 1)[0].lower()
-    return CATEGORY_MAP.get(slug)
-
-
-def iter_sitemap_locs(xml_text: str) -> list[str]:
-    root = ET.fromstring(xml_text)
-    return [
-        loc.text.strip()
-        for loc in root.findall(".//{*}loc")
-        if loc.text and loc.text.strip()
-    ]
-
-
-def fetch_text(session, url: str, timeout: int = 45) -> str:
-    response = session.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.text
-
-
-def fetch_sitemaps(session) -> list[str]:
-    index_text = fetch_text(session, SITEMAP_INDEX)
-    child_urls = iter_sitemap_locs(index_text)
-
-    # Prefer electronics/product sitemaps; ignore news/bytes assets.
+def fetch_sitemaps(session) -> list[tuple[str, str]]:
     selected = []
-    for url in child_urls:
-        low = url.lower()
-        if "/bytes/" in low:
-            continue
-        if any(token in low for token in CATEGORY_MAP):
-            selected.append(url)
-
-    if not selected:
-        # Fall back to all child sitemaps except bytes/news.
-        selected = [u for u in child_urls if "/bytes/" not in u.lower()]
-
-    print(f"[+] sitemap children discovered: {len(child_urls)}", flush=True)
-    print(f"[+] sitemap children selected: {len(selected)}", flush=True)
+    for category, slug in SITEMAP_CATEGORY_SLUGS.items():
+        selected.append((category, f"{SMARTPRIX_BASE}/sitemaps/in/{slug}.xml"))
     return selected
 
 
-def fetch_product_urls(session, limit: int = 6500) -> list[str]:
-    product_urls = []
-    seen = set()
+def fetch_product_urls(session, per_category_limit: int = 750) -> list[tuple[str, str]]:
+    # Return (product_url, category) and interleave categories so shard splits
+    # remain category-balanced.
+    by_category: dict[str, list[str]] = {}
 
-    for sitemap_url in fetch_sitemaps(session):
+    for category, sitemap_url in fetch_sitemaps(session):
         try:
             xml_text = fetch_text(session, sitemap_url)
+            urls = []
+            seen = set()
             for url in iter_sitemap_locs(xml_text):
-                category = category_from_url(url)
-                if category is None:
-                    continue
-
                 path = urlparse(url).path
                 if "-ppd" not in path:
                     continue
-
                 clean = url.split("?", 1)[0]
                 if clean in seen:
                     continue
                 seen.add(clean)
-                product_urls.append(clean)
-
-                if len(product_urls) >= limit:
+                urls.append(clean)
+                if len(urls) >= per_category_limit:
                     break
-
-            print(f"[+] {sitemap_url}: total unique product URLs = {len(product_urls)}", flush=True)
-            if len(product_urls) >= limit:
-                break
+            by_category[category] = urls
+            print(f"[+] {category}: {len(urls)} product URLs", flush=True)
         except Exception as exc:
-            print(f"[!] sitemap error {sitemap_url}: {exc}", file=sys.stderr, flush=True)
+            print(f"[!] {category} sitemap unavailable: {exc}", file=sys.stderr, flush=True)
 
-    return product_urls
-
-
-def fetch_product_json(session, product_url: str) -> Optional[dict[str, Any]]:
+    result = []
+    categories = list(by_category)
+    for i in range(max((len(v) for v in by_category.values()), default=0)):
+        for category in categories:
+            values = by_category[category]
+            if i < len(values):
+                result.append((values[i], category))
+    print(f"[+] balanced product URLs: {len(result)}", flush=True)
+    return result
+def fetch_product_json(session, product_url: str, max_retries: int = 6) -> Optional[dict[str, Any]]:
     path = urlparse(product_url).path
-    now_ms = int(time.time() * 1000)
-    payload = {
-        "url": path,
-        "data": {},
-        "t": now_ms,
-        "st": now_ms - 5000,
-    }
-    encoded = encode_api_payload(payload)
-    api_url = API_BASE + encoded
 
-    try:
-        response = session.get(api_url, timeout=45)
-        response.raise_for_status()
-        data = response.json()
-        return data if isinstance(data, dict) else None
-    except Exception as exc:
-        print(f"[!] API error {path}: {exc}", file=sys.stderr, flush=True)
-        return None
+    for attempt in range(max_retries):
+        now_ms = int(time.time() * 1000)
+        payload = {
+            "url": path,
+            "data": {},
+            "t": now_ms,
+            "st": now_ms - 5000,
+        }
+        encoded = encode_api_payload(payload)
+        api_url = API_BASE + encoded
 
+        try:
+            response = session.get(api_url, timeout=45)
 
-def parse_product(data: dict[str, Any], product_url: str) -> Optional[Product]:
-    item = data.get("item")
-    if not isinstance(item, dict):
-        return None
+            if response.status_code == 429:
+                delay = 3 * (attempt + 1)
+                print(
+                    f"[!] 429 rate limit for {path}; backing off {delay}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
+                continue
 
-    name = str(item.get("name") or "").strip()
-    brand_obj = item.get("brand")
-    brand = ""
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else None
 
-    if isinstance(brand_obj, dict):
-        brand = str(brand_obj.get("name") or "").strip()
-    elif brand_obj:
-        brand = str(brand_obj).strip()
+        except Exception as exc:
+            if attempt == max_retries - 1:
+                print(f"[!] API error {path}: {exc}", file=sys.stderr, flush=True)
+                return None
+            delay = 2 * (attempt + 1)
+            print(
+                f"[!] API retry {attempt + 1}/{max_retries} for {path}: {exc}; "
+                f"waiting {delay}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
 
-    category = category_from_url(product_url)
-    if not name or not brand or not category:
-        return None
+    return None
+def scrape(target: int = 1200, pause: float = 1.2, shard: int = 0, shards: int = 1) -> list[Product]:
+    session = cloudscraper.create_scraper()
+    all_urls = fetch_product_urls(session, per_category_limit=800)
 
-    price = clean_price(item.get("price"))
-    if price is None:
-        price = clean_price(item.get("fe_price"))
+    if not all_urls:
+        raise RuntimeError("No Smartprix product URLs were found.")
 
-    rating = find_rating(item)
-    release_year = find_release_year(item)
-
-    if price is None or rating is None:
-        return None
-
-    if release_year is not None and not (2000 <= release_year <= 2026):
-        release_year = None
-
-    return Product(
-        productname=name,
-        brand=brand,
-        category=category,
-        price=price,
-        rating=rating,
-        release_year=release_year,
+    shard_urls = all_urls[shard::shards]
+    print(
+        f"[+] shard {shard + 1}/{shards}: assigned {len(shard_urls)} URLs",
+        flush=True,
     )
 
-
-def scrape(target: int = 5000, pause: float = 0.35) -> list[Product]:
-    session = cloudscraper.create_scraper()
-    product_urls = fetch_product_urls(session, limit=max(6500, target + 1000))
-
-    if not product_urls:
-        raise RuntimeError("No Smartprix product URLs were found in the sitemap.")
-
-    products = []
+    products: list[Product] = []
     seen = set()
 
-    for idx, product_url in enumerate(product_urls, 1):
+    for idx, (product_url, sitemap_category) in enumerate(shard_urls, 1):
         data = fetch_product_json(session, product_url)
         if data:
             product = parse_product(data, product_url)
             if product:
+                # Use the actual Smartprix sitemap category, not keyword guesses.
+                product.category = sitemap_category
                 key = (
                     product.productname.casefold(),
                     product.brand.casefold(),
@@ -370,73 +372,48 @@ def scrape(target: int = 5000, pause: float = 0.35) -> list[Product]:
 
                     if len(products) % 100 == 0:
                         print(
-                            f"[+] valid rows: {len(products)} "
-                            f"(processed URLs: {idx})",
+                            f"[+] shard {shard + 1}: valid rows {len(products)} "
+                            f"(processed {idx})",
                             flush=True,
                         )
 
                     if len(products) >= target:
                         break
-
         time.sleep(pause)
 
     return products
-
-
-def write_csv(rows: Iterable[Product], output: str) -> None:
-    with open(output, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(OUTPUT_COLUMNS)
-
-        for idx, product in enumerate(rows, 1):
-            writer.writerow([
-                idx,
-                product.productname,
-                product.brand,
-                product.category,
-                product.price,
-                product.rating,
-                product.release_year if product.release_year is not None else "",
-            ])
-
-
 def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--target", type=int, default=5000)
-    parser.add_argument("--output", default="electronics_2026_india_5000plus.csv")
-    parser.add_argument("--pause", type=float, default=0.35)
+    parser.add_argument("--target", type=int, default=1200)
+    parser.add_argument("--output", default="electronics_shard.csv")
+    parser.add_argument("--pause", type=float, default=1.2)
+    parser.add_argument("--shard", type=int, default=0)
+    parser.add_argument("--shards", type=int, default=1)
     args = parser.parse_args()
 
-    rows = scrape(target=args.target, pause=args.pause)
-
-    if len(rows) < args.target:
-        print(
-            f"WARNING: only {len(rows)} valid real Smartprix products were collected. "
-            f"No synthetic rows were added.",
-            file=sys.stderr,
-        )
-        # Write whatever was genuinely collected for diagnostics.
-        write_csv(rows, args.output)
-        sys.exit(2)
+    rows = scrape(
+        target=args.target,
+        pause=args.pause,
+        shard=args.shard,
+        shards=args.shards,
+    )
 
     write_csv(rows, args.output)
 
     release_filled = sum(bool(x.release_year) for x in rows)
-    brands = len({x.brand for x in rows})
-    categories = len({x.category for x in rows})
-
-    print("\n=== FINAL DATASET CHECK ===")
+    print("\n=== SHARD CHECK ===")
     print("Rows:", len(rows))
-    print("Brands:", brands)
-    print("Categories:", categories)
+    print("Brands:", len({x.brand for x in rows}))
+    print("Categories:", len({x.category for x in rows}))
     print("Release years filled:", release_filled)
     print("Release years missing:", len(rows) - release_filled)
-    print("Price currency/source: INR / current Smartprix product API")
-    print("First row:", rows[0])
-    print("Last row:", rows[-1])
 
+    if len(rows) < args.target:
+        print(
+            f"WARNING: shard collected {len(rows)} valid rows; target was {args.target}. "
+            "No synthetic rows were added.",
+            file=sys.stderr,
+        )
 
-if __name__ == "__main__":
-    main()
