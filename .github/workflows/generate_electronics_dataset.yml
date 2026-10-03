@@ -68,7 +68,7 @@ jobs:
                   })
 
               def clean_price(v):
-                  m = re.search(r"[-+]?\\d[\\d,]*(?:\\.\\d+)?", (v or "").replace("₹", "").replace("$", ""))
+                  m = re.search(r"[-+]?\d[\d,]*(?:\.\d+)?", (v or "").replace("₹", "").replace("$", ""))
                   if not m:
                       return None
                   try:
@@ -89,11 +89,11 @@ jobs:
                   x = (v or "").strip()
                   if not x:
                       return None
-                  x = re.split(r"\\s*[|>]+\\s*", x)[0].strip()
+                  x = re.split(r"\s*[|>]+\s*", x)[0].strip()
                   return x or None
 
               def infer_brand(title):
-                  parts = re.split(r"\\s+", (title or "").strip())
+                  parts = re.split(r"\s+", (title or "").strip())
                   return parts[0] if parts else None
 
               rows = []
@@ -115,7 +115,7 @@ jobs:
                   release_year = ""
                   if year_col:
                       y = (raw.get(year_col) or "").strip()
-                      m = re.search(r"\\b(19\\d{2}|20\\d{2})\\b", y)
+                      m = re.search(r"\b(19\d{2}|20\d{2})\b", y)
                       if m:
                           release_year = m.group(1)
 
