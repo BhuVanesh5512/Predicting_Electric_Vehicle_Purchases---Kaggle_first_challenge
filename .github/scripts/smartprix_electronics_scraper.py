@@ -92,7 +92,8 @@ BRAND_ALIASES = {
 OUTPUT_COLUMNS = [
     "id", "productname", "brand", "category", "price", "rating", "release_year",
     "currency", "rating_count", "release_year_source", "product_url", "source",
-    "scraped_at",
+    "scraped_at", "mrp", "selling_price", "discount_amount", "discount_percent",
+    "mrp_source",
 ]
 
 
@@ -102,6 +103,8 @@ class Product:
     brand: str
     category: str
     price: int
+    mrp: Optional[int]
+    mrp_source: str
     rating: Optional[float]
     rating_count: Optional[int]
     release_year: Optional[int]
@@ -138,6 +141,90 @@ def clean_price(value: Any) -> Optional[int]:
     if number <= 0:
         return None
     return int(round(number))
+
+
+
+
+MRP_KEYS = {
+    "mrp", "maximumretailprice", "listprice", "originalprice",
+    "regularprice", "markedprice", "pricebeforediscount", "wasprice",
+    "strikeprice", "retailprice", "maximumretailpriceinr",
+}
+
+
+def _price_from_value(value: Any) -> Optional[int]:
+    """Read a monetary value without treating boolean/foreign-currency text as INR."""
+    if isinstance(value, dict):
+        for key in ("amount", "value", "price", "displayValue", "display_value", "text"):
+            if key in value:
+                parsed = clean_price(value.get(key))
+                if parsed is not None:
+                    return parsed
+        return None
+    return clean_price(value)
+
+
+def find_mrp(item: dict[str, Any], selling_price: int) -> tuple[Optional[int], str]:
+    """Extract an explicit MRP/list/original price; never infer it from a discount."""
+    candidates: list[tuple[int, str]] = []
+
+    def walk(value: Any, path: str = "item", depth: int = 0) -> None:
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+                child_path = f"{path}.{key}"
+                if normalized in MRP_KEYS:
+                    amount = _price_from_value(child)
+                    if amount is not None:
+                        candidates.append((amount, child_path))
+                if isinstance(child, (dict, list)):
+                    walk(child, child_path, depth + 1)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, (dict, list)):
+                    walk(child, f"{path}[{index}]", depth + 1)
+
+    walk(item)
+
+    # Some product detail payloads put MRP in a named specification rather than
+    # a dedicated price field. Only accept a value where the specification label
+    # explicitly says MRP/list/maximum retail price.
+    full_specs = item.get("fullSpecs", [])
+    if isinstance(full_specs, list):
+        for group in full_specs:
+            if not isinstance(group, dict):
+                continue
+            for spec in group.get("items", []) or []:
+                if not isinstance(spec, dict):
+                    continue
+                title = re.sub(r"\s+", " ", str(spec.get("title") or "")).strip()
+                if re.search(r"\b(?:mrp|maximum retail price|list price|marked price)\b", title, re.I):
+                    for field in ("description", "value", "text"):
+                        amount = _price_from_value(spec.get(field))
+                        if amount is not None:
+                            candidates.append((amount, f"item.fullSpecs.{title}"))
+
+    # Reject values below the selling price because such a value is not a valid
+    # original/list price for an item currently sold at the detected price.
+    valid = [(amount, source) for amount, source in candidates if amount >= selling_price]
+    if not valid:
+        return None, ""
+    # Prefer the most explicitly named field and avoid arbitrarily taking a
+    # giant numeric from an unrelated specification.
+    priority = {
+        "mrp": 0, "maximumretailprice": 1, "maximumretailpriceinr": 2,
+        "originalprice": 3, "listprice": 4, "pricebeforediscount": 5,
+        "regularprice": 6, "markedprice": 7, "wasprice": 8,
+        "strikeprice": 9, "retailprice": 10,
+    }
+    def rank(candidate: tuple[int, str]) -> tuple[int, int]:
+        amount, source = candidate
+        key = re.sub(r"[^a-z0-9]", "", source.rsplit(".", 1)[-1].split("[", 1)[0].casefold())
+        return (priority.get(key, 50), amount)
+    amount, source = sorted(valid, key=rank)[0]
+    return amount, source
 
 
 def clean_rating(value: Any) -> Optional[float]:
@@ -379,6 +466,7 @@ def parse_product(data: dict[str, Any], category: str, product_url: str) -> Opti
     if not name or not brand or price is None:
         return None
 
+    mrp, mrp_source = find_mrp(item, price)
     release_year, release_year_source = find_release_year(item)
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return Product(
@@ -386,6 +474,8 @@ def parse_product(data: dict[str, Any], category: str, product_url: str) -> Opti
         brand=brand,
         category=category,
         price=price,
+        mrp=mrp,
+        mrp_source=mrp_source,
         rating=find_rating(item),
         rating_count=find_rating_count(item),
         release_year=release_year,
@@ -438,7 +528,14 @@ def write_csv(rows: list[Product], output: str) -> None:
                 "productname": p.productname,
                 "brand": p.brand,
                 "category": p.category,
+                # price stays the observed Smartprix selling price for backwards
+                # compatibility. The MRP is a separate explicit-source column.
                 "price": p.price,
+                "selling_price": p.price,
+                "mrp": "" if p.mrp is None else p.mrp,
+                "discount_amount": "" if p.mrp is None or p.mrp <= p.price else p.mrp - p.price,
+                "discount_percent": "" if p.mrp is None or p.mrp <= 0 else round((p.mrp - p.price) * 100 / p.mrp, 2),
+                "mrp_source": p.mrp_source,
                 "rating": "" if p.rating is None else p.rating,
                 "release_year": "" if p.release_year is None else p.release_year,
                 "currency": "INR",
