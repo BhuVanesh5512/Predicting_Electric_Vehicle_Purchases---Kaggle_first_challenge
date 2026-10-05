@@ -8,6 +8,11 @@ on:
       - ".github/scripts/scrape_electronics_2026_india.py"
       - ".github/workflows/generate_electronics_dataset.yml"
 
+# Only one dataset run can publish at a time, preventing concurrent pushes.
+concurrency:
+  group: electronics-dataset-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   scrape-shards:
     runs-on: ubuntu-latest
@@ -134,13 +139,39 @@ jobs:
           print("DISCOUNT_FILLED:", sum(bool(r["discount_percent"].strip()) for r in rows))
           print("DASHBOARD_COLUMNS:", columns)
           PY
-      - name: Commit corrected dataset
+      - name: Commit corrected dataset (retry safe push)
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add electronics_2026_india_5000plus.csv
-          git commit -m "Refresh Smartprix India electronics dashboard dataset" || echo "No changes to commit"
-          git push
+
+          # Keep this run's dataset outside the worktree while syncing to latest main.
+          cp electronics_2026_india_5000plus.csv /tmp/electronics_2026_india_5000plus.csv
+
+          for attempt in 1 2 3 4 5; do
+            echo "Publishing dataset, attempt ${attempt}/5"
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/electronics_2026_india_5000plus.csv electronics_2026_india_5000plus.csv
+            git add electronics_2026_india_5000plus.csv
+
+            if git diff --cached --quiet; then
+              echo "Dataset is already up to date on main."
+              exit 0
+            fi
+
+            git commit -m "Refresh Smartprix India electronics dashboard dataset"
+            if git push origin HEAD:main; then
+              echo "Dataset published successfully."
+              exit 0
+            fi
+
+            echo "Push race detected; retrying against the newest main."
+            sleep $((attempt * 3))
+          done
+
+          echo "Failed to publish dataset after five attempts." >&2
+          exit 1
       - name: Upload final CSV
         uses: actions/upload-artifact@v4
         with:
