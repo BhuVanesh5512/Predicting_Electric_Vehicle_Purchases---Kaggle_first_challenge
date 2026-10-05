@@ -1,151 +1,116 @@
 name: Generate 5000+ real electronics CSV from Smartprix India
 
 on:
-  # Manual execution avoids launching expensive six-shard scrapes for every code commit.
+  # Manual execution prevents code edits from launching expensive scrapes.
   workflow_dispatch:
 
-# Only one dataset run can publish at a time, preventing concurrent pushes.
 concurrency:
   group: electronics-dataset-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  scrape-shards:
+  generate-dataset:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+    # One runner instead of six parallel shards to cut total Actions-minute usage.
     timeout-minutes: 180
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install scraper dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install cloudscraper beautifulsoup4
-      - name: Validate active scraper code
-        run: python -m py_compile .github/scripts/smartprix_electronics_scraper.py
-      - name: Scrape Smartprix shard
-        run: |
-          python .github/scripts/smartprix_electronics_scraper.py \
-            --target 1000 \
-            --output shard_${{ matrix.shard }}.csv \
-            --pause 0.6 \
-            --shard ${{ matrix.shard }} \
-            --shards 6 \
-            --mrp-verification-limit 50
-      - name: Upload shard
-        uses: actions/upload-artifact@v4
-        with:
-          name: electronics-shard-${{ matrix.shard }}
-          path: shard_${{ matrix.shard }}.csv
-          if-no-files-found: error
-          retention-days: 30
-
-  merge:
-    needs: scrape-shards
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Download all shard artifacts
-        uses: actions/download-artifact@v4
         with:
-          pattern: electronics-shard-*
-          path: shards
-          merge-multiple: false
-      - name: Merge, deduplicate and validate dashboard dataset
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scraper dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install cloudscraper beautifulsoup4
+
+      - name: Validate scraper syntax
+        run: python -m py_compile .github/scripts/smartprix_electronics_scraper.py
+
+      - name: Scrape one cross-category dataset
+        run: |
+          python .github/scripts/smartprix_electronics_scraper.py \
+            --target 5500 \
+            --output electronics_2026_india_5000plus.csv \
+            --pause 0.6 \
+            --shard 0 \
+            --shards 1 \
+            --mrp-verification-limit 50
+
+      - name: Validate and summarize dataset
         run: |
           python - <<'PY'
-          import csv, glob, re
+          import csv
           from collections import Counter
           from datetime import datetime, timezone
 
-          columns = [
+          path = "electronics_2026_india_5000plus.csv"
+          expected_columns = [
               "id", "productname", "brand", "category", "price", "rating", "release_year",
-              "currency", "rating_count", "release_year_source", "product_url", "source", "scraped_at",
-              "mrp", "selling_price", "discount_amount", "discount_percent", "mrp_source",
-              "mrp_source_type", "mrp_verified_at"
+              "currency", "rating_count", "release_year_source", "product_url", "source",
+              "scraped_at", "mrp", "selling_price", "discount_amount", "discount_percent",
+              "mrp_source", "mrp_source_type", "mrp_verified_at",
           ]
-          files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
-          expected = [f"shards/electronics-shard-{i}/shard_{i}.csv" for i in range(6)]
-          missing = [p for p in expected if p not in files]
-          if missing:
-              raise SystemExit("Missing shard artifacts: " + ", ".join(missing))
+          with open(path, encoding="utf-8-sig", newline="") as f:
+              reader = csv.DictReader(f)
+              if reader.fieldnames != expected_columns:
+                  raise SystemExit(f"Unexpected CSV columns: {reader.fieldnames}")
+              rows = list(reader)
 
-          by_key = {}
-          for path in files:
-              with open(path, encoding="utf-8-sig", newline="") as f:
-                  for row in csv.DictReader(f):
-                      name = re.sub(r"[^a-z0-9]+", "", row.get("productname", "").casefold())
-                      brand = re.sub(r"[^a-z0-9]+", "", row.get("brand", "").casefold())
-                      key = (name, brand)
-                      if not name or not brand:
-                          continue
-                      if key not in by_key:
-                          by_key[key] = row
-                      elif not by_key[key].get("release_year") and row.get("release_year"):
-                          by_key[key] = row
-
-          rows = list(by_key.values())
           if len(rows) < 5000:
-              raise SystemExit(f"Only {len(rows)} unique rows collected; need at least 5000")
-          rows = rows[:6000]
-          for i, row in enumerate(rows, 1):
-              row["id"] = i
-              row["currency"] = row.get("currency") or "INR"
-              row["source"] = row.get("source") or "Smartprix India"
-              for col in columns:
-                  row.setdefault(col, "")
-
-          with open("electronics_2026_india_5000plus.csv", "w", encoding="utf-8-sig", newline="") as f:
-              writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
-              writer.writeheader()
-              writer.writerows(rows)
-
-          assert all(r["productname"].strip() and r["brand"].strip() and r["category"].strip() for r in rows)
-          assert all(r["currency"] == "INR" for r in rows)
-          assert all(float(r["price"]) > 0 for r in rows)
-          assert all(not r["selling_price"].strip() or float(r["selling_price"]) > 0 for r in rows)
-          assert all(not r["mrp"].strip() or float(r["mrp"]) > 0 for r in rows)
-          assert all(not r["discount_percent"].strip() or 0 <= float(r["discount_percent"]) <= 100 for r in rows)
-          assert all(not r["mrp"].strip() or r["mrp_source"].strip() for r in rows), "Every populated MRP must have explicit source evidence"
-          assert all(not r["mrp"].strip() or r["mrp_source_type"].strip() for r in rows), "Every populated MRP must identify its source type"
-          assert all(not r["rating"].strip() or 0 <= float(r["rating"]) <= 5 for r in rows)
+              raise SystemExit(f"Only {len(rows)} rows; at least 5,000 unique rows required.")
+          keys = [(r["productname"].casefold().strip(), r["brand"].casefold().strip()) for r in rows]
+          if len(set(keys)) != len(keys):
+              raise SystemExit(f"Duplicate product-name/brand keys found: {len(keys) - len(set(keys))}")
+          if not all(r["productname"].strip() and r["brand"].strip() and r["category"].strip() for r in rows):
+              raise SystemExit("Blank product name, brand, or category found.")
+          if not all(r["currency"] == "INR" for r in rows):
+              raise SystemExit("Unexpected currency; dataset is intended to use INR.")
+          if not all(float(r["price"]) > 0 for r in rows):
+              raise SystemExit("Invalid selling price.")
+          if not all(not r["mrp"].strip() or float(r["mrp"]) >= float(r["price"]) for r in rows):
+              raise SystemExit("MRP must not be below the observed selling price.")
+          if not all(not r["mrp"].strip() or (r["mrp_source"].strip() and r["mrp_source_type"].strip()) for r in rows):
+              raise SystemExit("Every populated MRP needs a source URL and source type.")
+          if not all(not r["discount_percent"].strip() or 0 <= float(r["discount_percent"]) <= 100 for r in rows):
+              raise SystemExit("Invalid discount percentage.")
+          if not all(not r["rating"].strip() or 0 <= float(r["rating"]) <= 5 for r in rows):
+              raise SystemExit("Rating outside 0–5.")
           current_year = datetime.now(timezone.utc).year
           years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
-          assert all(2000 <= y <= current_year for y in years)
-          assert all((not r["release_year"].strip()) or r["release_year_source"].strip() for r in rows), "Every populated release year must have a source explanation"
-
+          if not all(2000 <= y <= current_year for y in years):
+              raise SystemExit("Release year outside accepted range.")
           print("ROWS:", len(rows))
           print("BRANDS:", len({r["brand"] for r in rows}))
           print("CATEGORIES:", Counter(r["category"] for r in rows).most_common())
           print("RELEASE_YEAR_FILLED:", len(years))
-          print("RELEASE_YEAR_MISSING:", len(rows) - len(years))
-          print("CURRENCY_COUNTS:", Counter(r["currency"] for r in rows))
           print("MRP_FILLED:", sum(bool(r["mrp"].strip()) for r in rows))
           print("MRP_MISSING:", sum(not r["mrp"].strip() for r in rows))
           print("MRP_SOURCE_TYPES:", Counter(r["mrp_source_type"] for r in rows if r["mrp"].strip()))
-          print("DISCOUNT_FILLED:", sum(bool(r["discount_percent"].strip()) for r in rows))
-          print("DASHBOARD_COLUMNS:", columns)
+          print("CURRENCY:", Counter(r["currency"] for r in rows))
+          print("COLUMNS:", expected_columns)
           PY
-      - name: Commit corrected dataset (retry safe push)
+
+      - name: Upload validated CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: electronics-2026-india-5000plus
+          path: electronics_2026_india_5000plus.csv
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Commit dataset (retry safe push)
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Keep this run's dataset outside the worktree while syncing to latest main.
           cp electronics_2026_india_5000plus.csv /tmp/electronics_2026_india_5000plus.csv
 
           for attempt in 1 2 3 4 5; do
@@ -165,16 +130,8 @@ jobs:
               echo "Dataset published successfully."
               exit 0
             fi
-
-            echo "Push race detected; retrying against the newest main."
+            echo "Push race detected; retrying latest main."
             sleep $((attempt * 3))
           done
-
           echo "Failed to publish dataset after five attempts." >&2
           exit 1
-      - name: Upload final CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: electronics-2026-india-5000plus
-          path: electronics_2026_india_5000plus.csv
-          retention-days: 30
