@@ -71,7 +71,8 @@ jobs:
 
           columns = [
               "id", "productname", "brand", "category", "price", "rating", "release_year",
-              "currency", "rating_count", "release_year_source", "product_url", "source", "scraped_at"
+              "currency", "rating_count", "release_year_source", "product_url", "source", "scraped_at",
+              "mrp", "selling_price", "discount_amount", "discount_percent", "mrp_source"
           ]
           files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
           expected = [f"shards/electronics-shard-{i}/shard_{i}.csv" for i in range(6)]
@@ -112,6 +113,10 @@ jobs:
           assert all(r["productname"].strip() and r["brand"].strip() and r["category"].strip() for r in rows)
           assert all(r["currency"] == "INR" for r in rows)
           assert all(float(r["price"]) > 0 for r in rows)
+          assert all(not r["selling_price"].strip() or float(r["selling_price"]) > 0 for r in rows)
+          assert all(not r["mrp"].strip() or float(r["mrp"]) > 0 for r in rows)
+          assert all(not r["discount_percent"].strip() or 0 <= float(r["discount_percent"]) <= 100 for r in rows)
+          assert all(not r["mrp"].strip() or r["mrp_source"].strip() for r in rows), "Every populated MRP must have explicit source evidence"
           assert all(not r["rating"].strip() or 0 <= float(r["rating"]) <= 5 for r in rows)
           current_year = datetime.now(timezone.utc).year
           years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
@@ -124,6 +129,9 @@ jobs:
           print("RELEASE_YEAR_FILLED:", len(years))
           print("RELEASE_YEAR_MISSING:", len(rows) - len(years))
           print("CURRENCY_COUNTS:", Counter(r["currency"] for r in rows))
+          print("MRP_FILLED:", sum(bool(r["mrp"].strip()) for r in rows))
+          print("MRP_MISSING:", sum(not r["mrp"].strip() for r in rows))
+          print("DISCOUNT_FILLED:", sum(bool(r["discount_percent"].strip()) for r in rows))
           print("DASHBOARD_COLUMNS:", columns)
           PY
       - name: Commit corrected dataset
