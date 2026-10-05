@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
+      - ".github/scripts/smartprix_electronics_scraper.py"
       - ".github/scripts/scrape_electronics_2026_india.py"
       - ".github/workflows/generate_electronics_dataset.yml"
 
@@ -13,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0,1,2,3,4,5]
+        shard: [0, 1, 2, 3, 4, 5]
     timeout-minutes: 360
     permissions:
       contents: read
@@ -28,9 +29,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install cloudscraper beautifulsoup4
-      - name: Validate scraper code
-        run: python -m py_compile .github/scripts/scrape_electronics_2026_india.py
-
+      - name: Validate active scraper code
+        run: python -m py_compile .github/scripts/smartprix_electronics_scraper.py
       - name: Scrape Smartprix shard
         run: |
           python .github/scripts/smartprix_electronics_scraper.py \
@@ -62,49 +62,76 @@ jobs:
           pattern: electronics-shard-*
           path: shards
           merge-multiple: false
-      - name: Merge, deduplicate and validate
+      - name: Merge, deduplicate and validate dashboard dataset
         run: |
           python - <<'PY'
-          import csv, glob
+          import csv, glob, re
           from collections import Counter
+          from datetime import datetime, timezone
+
+          columns = [
+              "id", "productname", "brand", "category", "price", "rating", "release_year",
+              "currency", "rating_count", "release_year_source", "product_url", "source", "scraped_at"
+          ]
           files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
           expected = [f"shards/electronics-shard-{i}/shard_{i}.csv" for i in range(6)]
           missing = [p for p in expected if p not in files]
           if missing:
               raise SystemExit("Missing shard artifacts: " + ", ".join(missing))
-          rows, seen = [], set()
+
+          by_key = {}
           for path in files:
               with open(path, encoding="utf-8-sig", newline="") as f:
-                  for r in csv.DictReader(f):
-                      key=(r["productname"].strip().casefold(),r["brand"].strip().casefold(),r["category"].strip().casefold())
-                      if key not in seen:
-                          seen.add(key); rows.append(r)
+                  for row in csv.DictReader(f):
+                      name = re.sub(r"[^a-z0-9]+", "", row.get("productname", "").casefold())
+                      brand = re.sub(r"[^a-z0-9]+", "", row.get("brand", "").casefold())
+                      key = (name, brand)
+                      if not name or not brand:
+                          continue
+                      if key not in by_key:
+                          by_key[key] = row
+                      elif not by_key[key].get("release_year") and row.get("release_year"):
+                          by_key[key] = row
+
+          rows = list(by_key.values())
           if len(rows) < 5000:
               raise SystemExit(f"Only {len(rows)} unique rows collected; need at least 5000")
-          rows=rows[:6000]
-          for i,r in enumerate(rows,1): r["id"]=i
-          out="electronics_2026_india_5000plus.csv"
-          with open(out,"w",encoding="utf-8",newline="") as f:
-              w=csv.DictWriter(f,fieldnames=["id","productname","brand","category","price","rating","release_year"])
-              w.writeheader(); w.writerows(rows)
-          assert all(r["brand"].strip() for r in rows)
-          assert all(r["category"].strip() for r in rows)
-          assert all(float(r["price"])>0 for r in rows)
-          assert all(0<=float(r["rating"])<=5 for r in rows)
-          years=[int(r["release_year"]) for r in rows if r["release_year"].strip()]
-          assert all(2000<=y<=2026 for y in years)
-          print("ROWS:",len(rows))
-          print("BRANDS:",len({r["brand"] for r in rows}))
-          print("CATEGORIES:",Counter(r["category"] for r in rows).most_common())
-          print("RELEASE_YEAR_FILLED:",len(years))
-          print("RELEASE_YEAR_MISSING:",len(rows)-len(years))
+          rows = rows[:6000]
+          for i, row in enumerate(rows, 1):
+              row["id"] = i
+              row["currency"] = row.get("currency") or "INR"
+              row["source"] = row.get("source") or "Smartprix India"
+              for col in columns:
+                  row.setdefault(col, "")
+
+          with open("electronics_2026_india_5000plus.csv", "w", encoding="utf-8-sig", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+              writer.writeheader()
+              writer.writerows(rows)
+
+          assert all(r["productname"].strip() and r["brand"].strip() and r["category"].strip() for r in rows)
+          assert all(r["currency"] == "INR" for r in rows)
+          assert all(float(r["price"]) > 0 for r in rows)
+          assert all(not r["rating"].strip() or 0 <= float(r["rating"]) <= 5 for r in rows)
+          current_year = datetime.now(timezone.utc).year
+          years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
+          assert all(2000 <= y <= current_year for y in years)
+          assert all((not r["release_year"].strip()) or r["release_year_source"].strip() for r in rows), "Every populated release year must have a source explanation"
+
+          print("ROWS:", len(rows))
+          print("BRANDS:", len({r["brand"] for r in rows}))
+          print("CATEGORIES:", Counter(r["category"] for r in rows).most_common())
+          print("RELEASE_YEAR_FILLED:", len(years))
+          print("RELEASE_YEAR_MISSING:", len(rows) - len(years))
+          print("CURRENCY_COUNTS:", Counter(r["currency"] for r in rows))
+          print("DASHBOARD_COLUMNS:", columns)
           PY
       - name: Commit corrected dataset
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add electronics_2026_india_5000plus.csv
-          git commit -m "Add corrected Smartprix 2026 India electronics dataset" || echo "No changes to commit"
+          git commit -m "Refresh Smartprix India electronics dashboard dataset" || echo "No changes to commit"
           git push
       - name: Upload final CSV
         uses: actions/upload-artifact@v4
