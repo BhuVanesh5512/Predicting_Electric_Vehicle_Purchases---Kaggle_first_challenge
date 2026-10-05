@@ -356,21 +356,21 @@ def verify_mrp_online(
     product_name: str,
     selling_price: int,
 ) -> tuple[Optional[int], str, str, str]:
-    """Find an explicitly labelled MRP from official/retailer product pages.
+    """Verify MRP against one official/retailer product page.
 
-    Returns (mrp, source_url, source_type, checked_at). No fallback derives MRP
-    from a sale price, launch price, discount percentage, or Wikipedia.
+    The search is only discovery; we only accept an explicitly labelled MRP
+    from the matching product page itself. There is exactly one search and at
+    most one page request per product. Wikipedia, launch prices and discounts
+    are not used as MRP evidence.
     """
     checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     brand_key = brand.casefold()
     official = OFFICIAL_DOMAINS.get(brand_key, ())
     query = f'"{product_name}" MRP India'
-    if official:
-        query += " " + " OR ".join(f"site:{domain}" for domain in official[:2])
-
     search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query)
+
     try:
-        response = session.get(search_url, timeout=25)
+        response = session.get(search_url, timeout=8)
         response.raise_for_status()
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(response.text, "html.parser")
@@ -390,42 +390,52 @@ def verify_mrp_online(
         parsed = urlparse(source_url)
         host = parsed.hostname or ""
 
-        source_type = ""
         if official and _domain_matches(host, official):
             source_type = "manufacturer_official"
+            priority = 0
         elif _domain_matches(host, RETAILER_DOMAINS):
             source_type = "retailer"
+            priority = 1
         else:
             continue
-        if not _result_matches_product(product_name, title, snippet):
+        if not source_url or not _result_matches_product(product_name, title, snippet):
             continue
+        candidates.append((priority, source_url, source_type, title))
 
-        # Search snippets are used only if the snippet itself labels the value
-        # explicitly as MRP. Otherwise inspect the trusted product page.
-        amount = _extract_explicit_mrp(snippet, selling_price)
-        candidates.append((0 if source_type == "manufacturer_official" else 1, source_url, source_type, amount))
+    # Only one matching page gets opened. This bounds the lookup time and
+    # avoids letting several unrelated search results stall a shard for hours.
+    candidates.sort(key=lambda result: result[0])
+    if not candidates:
+        return None, "", "not_found", checked_at
 
-    candidates.sort(key=lambda row: row[0])
-    for _, source_url, source_type, snippet_amount in candidates[:4]:
-        if snippet_amount is not None:
-            return snippet_amount, source_url, source_type, checked_at
-        try:
-            page = session.get(source_url, timeout=25)
-            if page.status_code >= 400:
-                continue
-            from bs4 import BeautifulSoup
-            page_soup = BeautifulSoup(page.text, "html.parser")
-            for node in page_soup(["script", "style", "noscript", "svg"]):
-                node.decompose()
-            text = page_soup.get_text(" ", strip=True)
-            amount = _extract_explicit_mrp(text, selling_price)
-            if amount is not None:
-                return amount, source_url, source_type, checked_at
-        except Exception:
-            continue
+    _, source_url, source_type, _ = candidates[0]
+    try:
+        page = session.get(source_url, timeout=8)
+        if page.status_code >= 400:
+            return None, "", "unavailable", checked_at
 
-    return None, "", "unavailable", checked_at
+        # Do not accept MRP from a page that redirects away from an allowed
+        # manufacturer/retailer domain.
+        final_url = str(getattr(page, "url", source_url) or source_url)
+        final_host = urlparse(final_url).hostname or ""
+        allowed = official if source_type == "manufacturer_official" else RETAILER_DOMAINS
+        if not _domain_matches(final_host, allowed):
+            final_url, final_host = source_url, urlparse(source_url).hostname or ""
+            if not _domain_matches(final_host, allowed):
+                return None, "", "unavailable", checked_at
 
+        from bs4 import BeautifulSoup
+        page_soup = BeautifulSoup(page.text, "html.parser")
+        for node in page_soup(["script", "style", "noscript", "svg"]):
+            node.decompose()
+        page_text = page_soup.get_text(" ", strip=True)
+        amount = _extract_explicit_mrp(page_text, selling_price)
+        if amount is not None:
+            return amount, final_url, source_type, checked_at
+    except Exception as exc:
+        print(f"[!] MRP page check unavailable for {product_name[:70]}: {exc}", file=sys.stderr, flush=True)
+
+    return None, "", "no_explicit_mrp", checked_at
 
 def clean_rating(value: Any) -> Optional[float]:
     if value is None or isinstance(value, bool):
@@ -689,7 +699,7 @@ def parse_product(data: dict[str, Any], category: str, product_url: str) -> Opti
     )
 
 
-def scrape(target: int, pause: float, shard: int, shards: int) -> list[Product]:
+def scrape(target: int, pause: float, shard: int, shards: int, mrp_verification_limit: int = 200) -> list[Product]:
     if shards < 1 or not 0 <= shard < shards:
         raise ValueError("shard must be in [0, shards), and shards must be >= 1")
     session = cloudscraper.create_scraper()
@@ -701,6 +711,8 @@ def scrape(target: int, pause: float, shard: int, shards: int) -> list[Product]:
 
     products: list[Product] = []
     seen = set()
+    mrp_checks = 0
+    mrp_found = 0
     for idx, (url, category) in enumerate(assigned, 1):
         data = fetch_product_json(session, url)
         if data:
@@ -712,7 +724,8 @@ def scrape(target: int, pause: float, shard: int, shards: int) -> list[Product]:
                 )
                 if key not in seen:
                     seen.add(key)
-                    if product.mrp is None:
+                    if product.mrp is None and mrp_checks < mrp_verification_limit:
+                        mrp_checks += 1
                         external_mrp, source_url, source_type, checked_at = verify_mrp_online(
                             session, product.brand, product.productname, product.price
                         )
@@ -720,9 +733,18 @@ def scrape(target: int, pause: float, shard: int, shards: int) -> list[Product]:
                         product.mrp_source = source_url
                         product.mrp_source_type = source_type
                         product.mrp_verified_at = checked_at
+                        if external_mrp is not None:
+                            mrp_found += 1
+                    elif product.mrp is None:
+                        product.mrp_source_type = "not_checked_limit"
+                        product.mrp_verified_at = ""
                     products.append(product)
                     if len(products) % 100 == 0:
-                        print(f"[+] shard {shard + 1}: rows={len(products)} processed={idx}", flush=True)
+                        print(
+                            f"[+] shard {shard + 1}: rows={len(products)} processed={idx} "
+                            f"MRP checks={mrp_checks}/{mrp_verification_limit} MRP found={mrp_found}",
+                            flush=True,
+                        )
                     if len(products) >= target:
                         break
         time.sleep(pause)
@@ -768,14 +790,17 @@ def main() -> None:
     parser.add_argument("--pause", type=float, default=1.2)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
+    parser.add_argument("--mrp-verification-limit", type=int, default=200)
     args = parser.parse_args()
 
-    rows = scrape(args.target, args.pause, args.shard, args.shards)
+    rows = scrape(args.target, args.pause, args.shard, args.shards, args.mrp_verification_limit)
     write_csv(rows, args.output)
     print(f"[+] ROWS: {len(rows)}", flush=True)
     print(f"[+] BRANDS: {len({p.brand for p in rows})}", flush=True)
     print(f"[+] CATEGORIES: {len({p.category for p in rows})}", flush=True)
     print(f"[+] RELEASE YEARS FILLED: {sum(p.release_year is not None for p in rows)}", flush=True)
+    print(f"[+] MRP VALUES FOUND: {sum(p.mrp is not None for p in rows)}", flush=True)
+    print(f"[+] MRP VALUES CHECKED: {sum(p.mrp_verified_at != '' for p in rows)}", flush=True)
     if len(rows) < args.target:
         print(f"ERROR: only {len(rows)} valid rows; target={args.target}; no synthetic rows added.",
               file=sys.stderr, flush=True)
