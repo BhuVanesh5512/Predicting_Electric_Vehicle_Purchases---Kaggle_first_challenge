@@ -1,12 +1,8 @@
 name: Generate 5000+ real electronics CSV from Smartprix India
 
 on:
+  # Manual execution avoids launching expensive six-shard scrapes for every code commit.
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/scripts/smartprix_electronics_scraper.py"
-      - ".github/scripts/scrape_electronics_2026_india.py"
-      - ".github/workflows/generate_electronics_dataset.yml"
 
 # Only one dataset run can publish at a time, preventing concurrent pushes.
 concurrency:
