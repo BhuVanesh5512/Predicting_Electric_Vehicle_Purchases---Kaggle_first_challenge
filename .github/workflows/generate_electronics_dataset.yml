@@ -20,7 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5]
-    timeout-minutes: 360
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:
@@ -41,9 +41,10 @@ jobs:
           python .github/scripts/smartprix_electronics_scraper.py \
             --target 1000 \
             --output shard_${{ matrix.shard }}.csv \
-            --pause 1.2 \
+            --pause 0.6 \
             --shard ${{ matrix.shard }} \
-            --shards 6
+            --shards 6 \
+            --mrp-verification-limit 50
       - name: Upload shard
         uses: actions/upload-artifact@v4
         with:
