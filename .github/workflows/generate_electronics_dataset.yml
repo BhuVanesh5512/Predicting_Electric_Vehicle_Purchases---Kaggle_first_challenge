@@ -35,14 +35,29 @@ jobs:
         run: python -m py_compile .github/scripts/smartprix_electronics_scraper.py
 
       - name: Scrape one cross-category dataset
+        shell: bash
         run: |
+          set +e
+          set -o pipefail
           python .github/scripts/smartprix_electronics_scraper.py \
-            --target 5500 \
+            --target 5000 \
             --output electronics_2026_india_5000plus.csv \
             --pause 0.6 \
             --shard 0 \
             --shards 1 \
-            --mrp-verification-limit 50
+            --mrp-verification-limit 50 2>&1 | tee scraper.log
+          result=${PIPESTATUS[0]}
+          echo "SCRAPER_EXIT_CODE=${result}" | tee -a scraper.log
+          exit "${result}"
+
+      - name: Upload scraper diagnostic log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electronics-scraper-diagnostic-log
+          path: scraper.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Validate and summarize dataset
         run: |
