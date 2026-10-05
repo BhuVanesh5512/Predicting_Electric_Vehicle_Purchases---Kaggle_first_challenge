@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qs, unquote_plus, quote_plus
 
 import cloudscraper
 
@@ -93,7 +93,7 @@ OUTPUT_COLUMNS = [
     "id", "productname", "brand", "category", "price", "rating", "release_year",
     "currency", "rating_count", "release_year_source", "product_url", "source",
     "scraped_at", "mrp", "selling_price", "discount_amount", "discount_percent",
-    "mrp_source",
+    "mrp_source", "mrp_source_type", "mrp_verified_at",
 ]
 
 
@@ -105,6 +105,8 @@ class Product:
     price: int
     mrp: Optional[int]
     mrp_source: str
+    mrp_source_type: str
+    mrp_verified_at: str
     rating: Optional[float]
     rating_count: Optional[int]
     release_year: Optional[int]
@@ -225,6 +227,204 @@ def find_mrp(item: dict[str, Any], selling_price: int) -> tuple[Optional[int], s
         return (priority.get(key, 50), amount)
     amount, source = sorted(valid, key=rank)[0]
     return amount, source
+
+
+# Price verification sources. Prefer the product manufacturer's own regional
+# website, then known Indian retail chains/marketplaces. Wikipedia and blogs
+# are deliberately excluded as sources of current MRP.
+OFFICIAL_DOMAINS = {
+    "samsung": ("samsung.com",),
+    "apple": ("apple.com",),
+    "lenovo": ("lenovo.com",),
+    "hp": ("hp.com",),
+    "dell": ("dell.com",),
+    "asus": ("asus.com",),
+    "acer": ("acer.com",),
+    "msi": ("msi.com",),
+    "lg": ("lg.com",),
+    "sony": ("sony.co.in", "sony.com"),
+    "xiaomi": ("mi.com", "xiaomi.com"),
+    "realme": ("realme.com",),
+    "oneplus": ("oneplus.in", "oneplus.com"),
+    "oppo": ("oppo.com",),
+    "vivo": ("vivo.com",),
+    "motorola": ("motorola.com", "motorola.in"),
+    "nothing": ("nothing.tech",),
+    "google": ("store.google.com", "google.com"),
+    "canon": ("canon.co.in", "canon.com"),
+    "nikon": ("nikon.co.in", "nikon.com"),
+    "fujifilm": ("fujifilm.com", "fujifilm-x.com"),
+    "panasonic": ("panasonic.com",),
+    "gopro": ("gopro.com",),
+    "tcl": ("tcl.com",),
+    "hisense": ("hisense-india.com", "hisense.com"),
+    "boat": ("boat-lifestyle.com",),
+    "jbl": ("in.jbl.com", "jbl.com"),
+    "logitech": ("logitech.com",),
+    "razer": ("razer.com",),
+    "tp-link": ("tp-link.com",),
+    "netgear": ("netgear.com",),
+    "wd": ("westerndigital.com",),
+    "seagate": ("seagate.com",),
+    "kingston": ("kingston.com",),
+    "sandisk": ("sandisk.com",),
+    "fire-boltt": ("fireboltt.com",),
+    "amazfit": ("amazfit.com",),
+    "garmin": ("garmin.com",),
+    "fastrack": ("fastrack.in",),
+    "noise": ("gonoise.com",),
+    "portronics": ("portronics.com",),
+    "zebronics": ("zebronics.com",),
+    "anker": ("anker.com",),
+    "ugreen": ("ugreen.com",),
+    "belkin": ("belkin.com",),
+    "fossil": ("fossil.com",),
+    "crucial": ("crucial.com",),
+    "d-link": ("dlink.com",),
+    "tenda": ("tendacn.com", "tenda.com"),
+    "vu": ("vutvs.com",),
+}
+RETAILER_DOMAINS = (
+    "amazon.in", "flipkart.com", "croma.com", "reliancedigital.in",
+    "vijaysales.com", "tatacliq.com", "shopatsc.com", "poorvika.com",
+    "sangeethamobiles.com", "bajajmall.in",
+)
+
+
+def _domain_matches(host: str, domains: tuple[str, ...] | list[str]) -> bool:
+    host = (host or "").casefold().split(":")[0]
+    return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+
+def _canonical_result_url(href: str) -> str:
+    if not href:
+        return ""
+    parsed = urlparse(href)
+    if parsed.netloc.lower().endswith("duckduckgo.com"):
+        query = parse_qs(parsed.query)
+        target = query.get("uddg", [""])[0]
+        if target:
+            return unquote_plus(target)
+    return href
+
+
+def _extract_explicit_mrp(text: str, selling_price: int) -> Optional[int]:
+    """Only return a number immediately labelled as MRP/list retail price."""
+    if not text:
+        return None
+    cleaned = re.sub(r"\s+", " ", text)
+    patterns = (
+        r"(?:MRP|M\.?R\.?P\.?|maximum\s+retail\s+price|list\s+price|marked\s+price)"
+        r"\s*(?:is|:|\-|–|₹|Rs\.?|INR)?\s*(?:₹|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)",
+        r"(?:₹|Rs\.?|INR)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\([^)]{0,15}\)\s*)?"
+        r"(?:MRP|M\.?R\.?P\.?|maximum\s+retail\s+price)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, re.I)
+        if not match:
+            continue
+        amount = clean_price(match.group(1))
+        if amount is not None and amount >= selling_price:
+            return amount
+    return None
+
+
+def _result_matches_product(product_name: str, title: str, snippet: str) -> bool:
+    # Quoted product-name query provides the main disambiguation; additionally
+    # require a few meaningful model tokens to avoid accepting a sibling model.
+    text = f"{title} {snippet}".casefold()
+    tokens = [
+        t for t in re.findall(r"[a-z0-9]+", product_name.casefold())
+        if len(t) >= 3 and t not in {
+            "with", "from", "inch", "inches", "black", "white", "blue", "silver",
+            "grey", "gray", "gold", "ram", "rom", "wifi", "wi-fi", "gb", "tb",
+            "inch", "full", "hdmi", "display", "smart", "wireless", "android",
+            "edition", "series", "tablet", "laptop", "monitor", "headphones",
+            "earbuds", "camera", "mobile", "smartphone", "television", "led",
+        }
+    ]
+    model_tokens = [t for t in tokens if any(ch.isdigit() for ch in t)]
+    if model_tokens:
+        return sum(token in text for token in model_tokens) >= min(2, len(model_tokens))
+    useful = [t for t in tokens if len(t) >= 5]
+    return bool(useful) and sum(token in text for token in useful) >= min(2, len(useful))
+
+
+def verify_mrp_online(
+    session,
+    brand: str,
+    product_name: str,
+    selling_price: int,
+) -> tuple[Optional[int], str, str, str]:
+    """Find an explicitly labelled MRP from official/retailer product pages.
+
+    Returns (mrp, source_url, source_type, checked_at). No fallback derives MRP
+    from a sale price, launch price, discount percentage, or Wikipedia.
+    """
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    brand_key = brand.casefold()
+    official = OFFICIAL_DOMAINS.get(brand_key, ())
+    query = f'"{product_name}" MRP India'
+    if official:
+        query += " " + " OR ".join(f"site:{domain}" for domain in official[:2])
+
+    search_url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query)
+    try:
+        response = session.get(search_url, timeout=25)
+        response.raise_for_status()
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(response.text, "html.parser")
+    except Exception as exc:
+        print(f"[!] MRP search unavailable for {product_name[:70]}: {exc}", file=sys.stderr, flush=True)
+        return None, "", "unavailable", checked_at
+
+    candidates = []
+    for result in soup.select(".result"):
+        anchor = result.select_one("a.result__a")
+        if anchor is None:
+            continue
+        title = anchor.get_text(" ", strip=True)
+        source_url = _canonical_result_url(str(anchor.get("href") or ""))
+        snippet_node = result.select_one(".result__snippet")
+        snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+        parsed = urlparse(source_url)
+        host = parsed.hostname or ""
+
+        source_type = ""
+        if official and _domain_matches(host, official):
+            source_type = "manufacturer_official"
+        elif _domain_matches(host, RETAILER_DOMAINS):
+            source_type = "retailer"
+        else:
+            continue
+        if not _result_matches_product(product_name, title, snippet):
+            continue
+
+        # Search snippets are used only if the snippet itself labels the value
+        # explicitly as MRP. Otherwise inspect the trusted product page.
+        amount = _extract_explicit_mrp(snippet, selling_price)
+        candidates.append((0 if source_type == "manufacturer_official" else 1, source_url, source_type, amount))
+
+    candidates.sort(key=lambda row: row[0])
+    for _, source_url, source_type, snippet_amount in candidates[:4]:
+        if snippet_amount is not None:
+            return snippet_amount, source_url, source_type, checked_at
+        try:
+            page = session.get(source_url, timeout=25)
+            if page.status_code >= 400:
+                continue
+            from bs4 import BeautifulSoup
+            page_soup = BeautifulSoup(page.text, "html.parser")
+            for node in page_soup(["script", "style", "noscript", "svg"]):
+                node.decompose()
+            text = page_soup.get_text(" ", strip=True)
+            amount = _extract_explicit_mrp(text, selling_price)
+            if amount is not None:
+                return amount, source_url, source_type, checked_at
+        except Exception:
+            continue
+
+    return None, "", "unavailable", checked_at
 
 
 def clean_rating(value: Any) -> Optional[float]:
@@ -469,6 +669,8 @@ def parse_product(data: dict[str, Any], category: str, product_url: str) -> Opti
     mrp, mrp_source = find_mrp(item, price)
     release_year, release_year_source = find_release_year(item)
     now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    local_mrp_source_type = "smartprix_explicit" if mrp is not None else "unavailable"
+    checked_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     return Product(
         productname=name,
         brand=brand,
@@ -476,6 +678,8 @@ def parse_product(data: dict[str, Any], category: str, product_url: str) -> Opti
         price=price,
         mrp=mrp,
         mrp_source=mrp_source,
+        mrp_source_type=local_mrp_source_type,
+        mrp_verified_at=checked_at,
         rating=find_rating(item),
         rating_count=find_rating_count(item),
         release_year=release_year,
@@ -508,6 +712,14 @@ def scrape(target: int, pause: float, shard: int, shards: int) -> list[Product]:
                 )
                 if key not in seen:
                     seen.add(key)
+                    if product.mrp is None:
+                        external_mrp, source_url, source_type, checked_at = verify_mrp_online(
+                            session, product.brand, product.productname, product.price
+                        )
+                        product.mrp = external_mrp
+                        product.mrp_source = source_url
+                        product.mrp_source_type = source_type
+                        product.mrp_verified_at = checked_at
                     products.append(product)
                     if len(products) % 100 == 0:
                         print(f"[+] shard {shard + 1}: rows={len(products)} processed={idx}", flush=True)
@@ -536,6 +748,8 @@ def write_csv(rows: list[Product], output: str) -> None:
                 "discount_amount": "" if p.mrp is None or p.mrp <= p.price else p.mrp - p.price,
                 "discount_percent": "" if p.mrp is None or p.mrp <= 0 else round((p.mrp - p.price) * 100 / p.mrp, 2),
                 "mrp_source": p.mrp_source,
+                "mrp_source_type": p.mrp_source_type,
+                "mrp_verified_at": p.mrp_verified_at,
                 "rating": "" if p.rating is None else p.rating,
                 "release_year": "" if p.release_year is None else p.release_year,
                 "currency": "INR",
