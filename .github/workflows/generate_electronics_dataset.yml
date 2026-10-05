@@ -77,7 +77,8 @@ jobs:
           columns = [
               "id", "productname", "brand", "category", "price", "rating", "release_year",
               "currency", "rating_count", "release_year_source", "product_url", "source", "scraped_at",
-              "mrp", "selling_price", "discount_amount", "discount_percent", "mrp_source"
+              "mrp", "selling_price", "discount_amount", "discount_percent", "mrp_source",
+              "mrp_source_type", "mrp_verified_at"
           ]
           files = sorted(glob.glob("shards/electronics-shard-*/*.csv"))
           expected = [f"shards/electronics-shard-{i}/shard_{i}.csv" for i in range(6)]
@@ -122,6 +123,7 @@ jobs:
           assert all(not r["mrp"].strip() or float(r["mrp"]) > 0 for r in rows)
           assert all(not r["discount_percent"].strip() or 0 <= float(r["discount_percent"]) <= 100 for r in rows)
           assert all(not r["mrp"].strip() or r["mrp_source"].strip() for r in rows), "Every populated MRP must have explicit source evidence"
+          assert all(not r["mrp"].strip() or r["mrp_source_type"].strip() for r in rows), "Every populated MRP must identify its source type"
           assert all(not r["rating"].strip() or 0 <= float(r["rating"]) <= 5 for r in rows)
           current_year = datetime.now(timezone.utc).year
           years = [int(r["release_year"]) for r in rows if r["release_year"].strip()]
@@ -136,6 +138,7 @@ jobs:
           print("CURRENCY_COUNTS:", Counter(r["currency"] for r in rows))
           print("MRP_FILLED:", sum(bool(r["mrp"].strip()) for r in rows))
           print("MRP_MISSING:", sum(not r["mrp"].strip() for r in rows))
+          print("MRP_SOURCE_TYPES:", Counter(r["mrp_source_type"] for r in rows if r["mrp"].strip()))
           print("DISCOUNT_FILLED:", sum(bool(r["discount_percent"].strip()) for r in rows))
           print("DASHBOARD_COLUMNS:", columns)
           PY
