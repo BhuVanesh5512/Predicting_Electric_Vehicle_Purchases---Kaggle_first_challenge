@@ -17,3 +17,5 @@ learning_rate :0.1
 depth : 4
 
 all categorical features are used as cat features 
+
+finished between 1300 - 1400
